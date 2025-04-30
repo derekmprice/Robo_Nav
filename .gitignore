@@ -1,0 +1,7 @@
+.metadata/
+Debug/
+*.elf
+*.bin
+*.hex
+*.launch
+*.log
