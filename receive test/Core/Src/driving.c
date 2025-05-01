@@ -49,24 +49,6 @@ void mainBegin(void) {
 }
 
 /**
-  * @brief  GPIO EXTI Callback
-  * @param  GPIO_Pin: Specifies the pins connected to EXTI line.
-  * @retval None
-  */
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    if (GPIO_Pin == GPIO_PIN_13 && start == 0){
-        start = 1;
-        drove = 0;
-        current_pwm = start_pwm;
-    }
-    else if (GPIO_Pin == GPIO_PIN_13 && start == 1){
-        start = 0;
-        current_pwm = 0;
-    }
-}
-
-/**
   * @brief  Placeholder for main end function
   * @retval None
   */

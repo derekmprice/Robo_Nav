@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <float.h>
+#include "driving.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -95,9 +96,9 @@ uint8_t rx_data_ready = 0;
 #define IN_Port GPIOA
 #define STBY_Port GPIOA
 
-// Navigation variables
-uint8_t navigation_active = 0;
-uint8_t navigation_stage = 0; // 0=idle, 1=moving Y, 2=turning, 3=moving X, 4=done
+// Navigation variables - these are defined in driving.c, just reference them here
+extern int navigation_active;
+extern int navigation_stage;
 #define UWB_UNITS_PER_METER  175.0f
 #define DRIVE_TIME_PER_METER 1805.0f
 
