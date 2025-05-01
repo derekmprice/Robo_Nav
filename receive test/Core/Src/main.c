@@ -64,6 +64,10 @@ typedef struct {
 #define MAX_ANCHORS 3           // Number of anchors in the system
 #define RANGE_BUFFER_SIZE 10    // Number of samples to average (smaller than Python for memory)
 #define MAX_INTERSECTIONS 6     // Maximum number of intersections (3 anchors = max 6 intersections)
+
+// Navigation variables
+#define TARGET_X_POSITION    200.0f
+#define TARGET_Y_POSITION    200.0f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -83,6 +87,19 @@ uint8_t rx_buffer[RX_BUFFER_SIZE];
 uint8_t rx_index = 0;
 uint8_t rx_byte;
 uint8_t rx_data_ready = 0;
+
+// Motor control pin definitions
+#define AIN1 GPIO_PIN_1
+#define BIN1 GPIO_PIN_4
+#define STBY GPIO_PIN_6
+#define IN_Port GPIOA
+#define STBY_Port GPIOA
+
+// Navigation variables
+uint8_t navigation_active = 0;
+uint8_t navigation_stage = 0; // 0=idle, 1=moving Y, 2=turning, 3=moving X, 4=done
+#define UWB_UNITS_PER_METER  175.0f
+#define DRIVE_TIME_PER_METER 1805.0f
 
 // Anchor configuration (can be changed as needed)
 Anchor_t anchors[MAX_ANCHORS] = {
@@ -477,7 +494,26 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
         HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
     }
 }
-/* USER CODE END 0 */
+
+/* USER CODE BEGIN 4 */
+// Button press handler for navigation
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+    if (GPIO_Pin == B1_Pin) { // Blue button on PC13
+        // Only start navigation if we have a valid position
+        if (tag.status == 1) {
+            char debug_msg[100];
+            sprintf(debug_msg, "Starting navigation from (%.2f, %.2f) to (%.2f, %.2f)\r\n", 
+                    tag.x, tag.y, TARGET_X_POSITION, TARGET_Y_POSITION);
+            print_debug(debug_msg);
+            
+            navigation_active = 1;
+            navigation_stage = 1; // Start with Y-direction movement
+        } else {
+            print_debug("Cannot navigate: No valid position data\r\n");
+        }
+    }
+}
+/* USER CODE END 4 */
 
 /**
   * @brief  The application entry point.
@@ -542,7 +578,26 @@ int main(void)
     print_debug(anchor_info);
   }
   print_debug("----------------------------------\r\n");
+  
+  // Set the target position for navigation
+  char target_info[100];
+  sprintf(target_info, "Target position set to: (%.2f, %.2f) cm\r\n", 
+          TARGET_X_POSITION, TARGET_Y_POSITION);
+  print_debug(target_info);
+  print_debug("Press blue button (PC13) to start navigation\r\n");
+  print_debug("----------------------------------\r\n");
   print_debug("Listening for range data...\r\n\r\n");
+
+  // Initialize motor control pins
+  HAL_GPIO_WritePin(IN_Port, AIN1, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(IN_Port, BIN1, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(STBY_Port, STBY, GPIO_PIN_SET);
+  
+  // Start PWM for motor control
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
 
   /* USER CODE END 2 */
 
@@ -559,6 +614,136 @@ int main(void)
         rx_data_ready = 0;
     }
 
+    // Process navigation if active and we have valid position
+    if (navigation_active && tag.status) {
+        char debug_msg[100];
+        
+        // Calculate differences in X and Y
+        float diff_y = TARGET_Y_POSITION - tag.y;
+        float diff_x = TARGET_X_POSITION - tag.x;
+        
+        // Convert to physical units (assuming 175 units = 1 meter)
+        float meters_y = diff_y / UWB_UNITS_PER_METER;
+        float meters_x = diff_x / UWB_UNITS_PER_METER;
+        
+        // Calculate drive times (based on the robot's speed)
+        int y_drive_time = (int)(fabs(meters_y) * DRIVE_TIME_PER_METER);
+        int x_drive_time = (int)(fabs(meters_x) * DRIVE_TIME_PER_METER);
+        
+        // Handle navigation stages
+        switch(navigation_stage) {
+            case 1: // Y-direction movement
+                sprintf(debug_msg, "Moving %.2f meters in Y direction\r\n", meters_y);
+                print_debug(debug_msg);
+                
+                // Determine direction for Y movement
+                if (fabs(meters_y) > 0.05f) { // Only move if difference is significant
+                    if (meters_y > 0) {
+                        // Set motor direction forward
+                        HAL_GPIO_WritePin(IN_Port, AIN1, GPIO_PIN_RESET);
+                        HAL_GPIO_WritePin(IN_Port, BIN1, GPIO_PIN_RESET);
+                    } else {
+                        // Set motor direction backward
+                        HAL_GPIO_WritePin(IN_Port, AIN1, GPIO_PIN_SET);
+                        HAL_GPIO_WritePin(IN_Port, BIN1, GPIO_PIN_SET);
+                    }
+                    
+                    // Enable motors
+                    HAL_GPIO_WritePin(STBY_Port, STBY, GPIO_PIN_SET);
+                    
+                    // Set PWM for both motors
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 128);
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 128);
+                    
+                    // Run for calculated time
+                    HAL_Delay(y_drive_time);
+                    
+                    // Stop motors
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
+                    
+                    print_debug("Y movement complete\r\n");
+                }
+                
+                // Proceed to turning stage
+                navigation_stage = 2;
+                break;
+                
+            case 2: // Turning 90 degrees right
+                if (fabs(meters_x) > 0.05f) { // Only turn if X difference is significant
+                    print_debug("Turning 90 degrees right\r\n");
+                    
+                    // Set one motor forward, one backward for turning
+                    HAL_GPIO_WritePin(IN_Port, AIN1, GPIO_PIN_RESET);
+                    HAL_GPIO_WritePin(IN_Port, BIN1, GPIO_PIN_SET);
+                    
+                    // Enable motors
+                    HAL_GPIO_WritePin(STBY_Port, STBY, GPIO_PIN_SET);
+                    
+                    // Set PWM for both motors
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 128);
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 128);
+                    
+                    // Turn for fixed time (adjust as needed for 90 degrees)
+                    HAL_Delay(900);
+                    
+                    // Stop motors
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
+                    
+                    print_debug("Turn complete\r\n");
+                }
+                
+                // Proceed to X-direction movement
+                navigation_stage = 3;
+                break;
+                
+            case 3: // X-direction movement
+                sprintf(debug_msg, "Moving %.2f meters in X direction\r\n", meters_x);
+                print_debug(debug_msg);
+                
+                // Determine direction for X movement
+                if (fabs(meters_x) > 0.05f) { // Only move if difference is significant
+                    if (meters_x > 0) {
+                        // Set motor direction forward
+                        HAL_GPIO_WritePin(IN_Port, AIN1, GPIO_PIN_RESET);
+                        HAL_GPIO_WritePin(IN_Port, BIN1, GPIO_PIN_RESET);
+                    } else {
+                        // Set motor direction backward
+                        HAL_GPIO_WritePin(IN_Port, AIN1, GPIO_PIN_SET);
+                        HAL_GPIO_WritePin(IN_Port, BIN1, GPIO_PIN_SET);
+                    }
+                    
+                    // Enable motors
+                    HAL_GPIO_WritePin(STBY_Port, STBY, GPIO_PIN_SET);
+                    
+                    // Set PWM for both motors
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 128);
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 128);
+                    
+                    // Run for calculated time
+                    HAL_Delay(x_drive_time);
+                    
+                    // Stop motors
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
+                    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
+                    
+                    print_debug("X movement complete\r\n");
+                }
+                
+                // Navigation complete
+                navigation_stage = 4;
+                print_debug("Navigation complete!\r\n");
+                navigation_active = 0;
+                break;
+                
+            case 4: // Done
+                // Already completed navigation
+                navigation_active = 0;
+                break;
+        }
+    }
+
     // Toggle LED to indicate system is running
     static uint32_t last_led_time = 0;
     uint32_t current_time = HAL_GetTick();
@@ -566,7 +751,9 @@ int main(void)
         last_led_time = current_time;
         HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
     }
-    HAL_Delay(500);
+    
+    // Small delay to prevent CPU hogging
+    HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
@@ -823,7 +1010,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
+  // Enable EXTI interrupt for the blue button
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
